@@ -1,7 +1,7 @@
 # quantnote
 - notebooks
-    - Udacity-AI量化投资：uda课程及项目练习
-    - 总结提炼：风控模型、alpha模型范式总结（待更新）
+    - uda_notebooks：uda课程及项目练习
+    - summary：风控模型、alpha模型范式总结（待更新）
 - snippets
     - advances_in_financial_machine_learning.py 代码片段总结
 
