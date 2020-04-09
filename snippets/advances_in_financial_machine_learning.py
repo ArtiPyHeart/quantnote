@@ -525,3 +525,101 @@ def plotMinFFD():
     out[["adfStat", "corr"]].plot(secondary_y="adfStat")
     plt.axhline(out["95% conf"].mean(), linewidth=1, color="r", linestyle="dotted")
     plt.savefig(path + instName + "_testMinFFD.png")
+
+
+# -----------------------------------------------------------------------------
+# 6.2 three ways of setting up an RandomForest
+from sklearn.ensemble import RandomForestClassifier, BaggingClassifier
+from sklearn.tree import DecisionTreeClassifier
+
+clf0 = RandomForestClassifier(
+    n_estimators=1000, class_weight="balanced_subsample", criterion="entropy"
+)
+
+clf1 = DecisionTreeClassifier(
+    criterion="entropy", max_features="auto", class_weight="balanced"
+)
+clf1 = BaggingClassifier(
+    base_estimator=clf1, n_estimators=1000, max_samples=avgU
+)  # average uniqueness between samples
+
+clf2 = RandomForestClassifier(
+    n_estimators=1,
+    criterion="entropy",
+    bootstrap=False,
+    class_weight="balanced_subsample",
+)
+clf2 = BaggingClassifier(
+    base_estimator=clf2, n_estimators=1000, max_samples=avgU, max_features=1.0
+)
+
+# -----------------------------------------------------------------------------
+# 7.1 purging observation in the training set
+def getTrainTimes(t1, testTimes):
+    """
+    Given testTimes, find the times of the training observations.
+    —t1.index: Time when the observation started.
+    —t1.value: Time when the observation ended.
+    —testTimes: Times of testing observations.
+    """
+    trn = t1.copy(deep=True)
+    for i, j in testTimes.iteritems():
+        df0 = trn[(i <= trn.index) & (trn.index <= j)].index  # train starts within test
+        df1 = trn[(i <= trn) & (trn <= j)].index  # train ends within test
+        df2 = trn[(trn.index <= i) & (j <= trn)].index  # train envelops test
+        trn = trn.drop(df0.union(df1).union(df2))
+    return trn
+
+
+# -----------------------------------------------------------------------------
+# 7.2 embargo on training observations
+def getEmbargoTimes(times, pctEmbargo):
+    # Get embargo time for each bar
+    step = int(times.shape[0] * pctEmbargo)
+    if step == 0:
+        mbrg = pd.Series(times, index=times)
+    else:
+        mbrg = pd.Series(times[step:], index=times[:-step])
+        mbrg = mbrg.append(pd.Series(times[-1], index=times[-step:]))
+    return mbrg
+
+
+testTimes = pd.Series(mbrg[dt1], index=[dt0])  # include embargo before purge
+trainTimes = getTrainTimes(t1, testTimes)
+testTimes = t1.loc[dt0:dt1].index
+
+# -----------------------------------------------------------------------------
+# 7.3 cross-validation class when observations overlap
+class PurgedKFold(_BaseKFold):
+    """
+    Extend KFold class to work with labels that span intervals
+    The train is purged of observations overlapping test-label intervals
+    Test set is assumed contiguous (shuffle=False), w/o training samples in between
+    """
+
+    def __init__(self, n_splits=3, t1=None, pctEmbargo=0.0):
+        if not isinstance(t1, pd.Series):
+            raise ValueError("Label Through Dates must be a pd.Series")
+        super(PurgedKFold, self).__init__(n_splits, shuffle=False, random_state=None)
+        self.t1 = t1
+        self.pctEmbargo = pctEmbargo
+
+    def split(self, X, y=None, groups=None):
+        if (X.index == self.t1.index).sum() != len(self.t1):
+            raise ValueError("X and ThruDateValues must have the same index")
+        indices = np.arange(X.shape[0])
+        mbrg = int(X.shape[0] * self.pctEmbargo)
+        test_starts = [
+            (i[0], i[-1] + 1)
+            for i in np.array_split(np.arange(X.shape[0]), self.n_splits)
+        ]
+        for i, j in test_starts:
+            t0 = self.t1.index[i]  # start of test set
+            test_indices = indices[i:j]
+            maxT1Idx = self.t1.index.searchsorted(self.t1[test_indices].max())
+            train_indices = self.t1.index.searchsorted(self.t1[self.t1 <= t0].index)
+            if maxT1Idx < X.shape[0]:  # right train (with embargo)
+                train_indices = np.concatenate(
+                    (train_indices, indices[maxT1Idx + mbrg :])
+                )
+            yield train_indices, test_indices
