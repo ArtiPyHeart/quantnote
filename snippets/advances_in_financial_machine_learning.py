@@ -1713,3 +1713,513 @@ def hrpMC(
     stats.to_csv("stats.csv")
     df0, df1 = stats.std(), stats.var()
     print(pd.concat([df0, df1, df1 / df1["getHRP"] - 1], axis=1))
+
+
+# -----------------------------------------------------------------------------
+# 17.1 sadf's inner loop
+def get_bsadf(logP, minSL, constant, lags):
+    y, x = getYX(logP, constant=constant, lags=lags)
+    startPoints, bsadf, allADF = range(0, y.shape[0] + lags - minSL + 1), None, []
+    for start in startPoints:
+        y_, x_ = y[start:], x[start:]
+        bMean_, bStd_ = getBetas(y_, x_)
+        bMean_, bStd_ = bMean_[0, 0], bStd_[0, 0] ** 0.5
+        allADF.append(bMean_ / bStd_)
+        if allADF[-1] > bsadf:
+            bsadf = allADF[-1]
+    out = {"Time": logP.index[-1], "gsadf": bsadf}
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 17.2 preparing the datasets
+def getYX(series, constant, lags):
+    series_ = series.diff().dropna()
+    x = lagDF(series_, lags).dropna()
+    x.iloc[:, 0] = series.values[-x.shape[0] - 1 : -1, 0]  # lagged level
+    y = series_.iloc[-x.shape[0] :].values
+    if constant != "nc":
+        x = np.append(x, np.ones((x.shape[0], 1)), axis=1)
+        if constant[:2] == "ct":
+            trend = np.arange(x.shape[0]).reshape(-1, 1)
+            x = np.append(x, trend, axis=1)
+        if constant == "ctt":
+            x = np.append(x, trend ** 2, axis=1)
+    return y, x
+
+
+# -----------------------------------------------------------------------------
+# 17.3 apply lags to dataframe
+def lagDF(df0, lags):
+    df1 = pd.DataFrame()
+    if isinstance(lags, int):
+        lags = range(lags + 1)
+    else:
+        lags = [int(lag) for lag in lags]
+    for lag in lags:
+        df_ = df0.shift(lag).copy(deep=True)
+        df_.columns = [str(i) + "_" + str(lag) for i in df_.columns]
+        df1 = df1.join(df_, how="outer")
+    return df1
+
+
+# -----------------------------------------------------------------------------
+# 17.4 fitting the ADF specification
+def getBetas(y, x):
+    xy = np.dot(x.T, y)
+    xx = np.dot(x.T, x)
+    xxinv = np.linalg.inv(xx)
+    bMean = np.dot(xxinv, xy)
+    err = y - np.dot(x, bMean)
+    bVar = np.dot(err.T, err) / (x.shape[0] - x.shape[1]) * xxinv
+    return bMean, bVar
+
+
+# -----------------------------------------------------------------------------
+# plug-in entropy estimator
+def plugIn(msg, w):
+    # Compute plug-in (ML) entropy rate
+    pmf = pmf1(msg, w)
+    out = -sum([pmf[i] * np.log2(pmf[i]) for i in pmf]) / w
+    return out, pmf
+
+
+def pmf1(msg, w):
+    # Compute the prob mass function for a one-dim discrete rv
+    # len(msg)-w occurrences
+    lib = {}
+    if not isinstance(msg, str):
+        msg = "".join(map(str, msg))
+    for i in range(w, len(msg)):
+        msg_ = msg[i - w : i]
+        if msg_ not in lib:
+            lib[msg_] = [i - w]
+        else:
+            lib[msg_] = lib[msg_] + [i - w]
+    pmf = float(len(msg) - w)
+    pmf = {i: len(lib[i]) / pmf for i in lib}
+    return pmf
+
+
+# -----------------------------------------------------------------------------
+# 18.2 a library built using the LZ algorithm
+def lempelZiv_lib(msg):
+    i, lib = 1, [msg[0]]
+    while i < len(msg):
+        for j in range(i, len(msg)):
+            msg_ = msg[i : j + 1]
+        if msg_ not in lib:
+            lib.append(msg_)
+            break
+        i = j + 1
+    return lib
+
+
+# -----------------------------------------------------------------------------
+# 18.3 function that computes the length of the longest match
+def matchLength(msg, i, n):
+    # Maximum matched length+1, with overlap.
+    # i>=n & len(msg)>=i+n
+    subS = ""
+    for l in range(n):
+        msg1 = msg[i : i + l + 1]
+        for j in range(i - n, i):
+            msg0 = msg[j : j + l + 1]
+            if msg1 == msg0:
+                subS = msg1
+                break  # search for higher l.
+    return len(subS) + 1, subS  # matched length + 1
+
+
+# -----------------------------------------------------------------------------
+# 18.4 implementation of algorithms discussed in GAO ET AL.[2008]
+def konto(msg, window=None):
+    """
+    * Kontoyiannis’ LZ entropy estimate, 2013 version (centered window).
+    * Inverse of the avg length of the shortest non-redundant substring.
+    * If non-redundant substrings are short, the text is highly entropic.
+    * window==None for expanding window, in which case len(msg)%2==0
+    * If the end of msg is more relevant, try konto(msg[::-1])
+    """
+    out = {"num": 0, "sum": 0, "subS": []}
+    if not isinstance(msg, str):
+        msg = "".join(map(str, msg))
+    if window is None:
+        points = range(1, len(msg) / 2 + 1)
+    else:
+        window = min(window, len(msg) / 2)
+    points = range(window, len(msg) - window + 1)
+    for i in points:
+        if window is None:
+            l, msg_ = matchLength(msg, i, i)
+            out["sum"] += np.log2(i + 1) / l  # to avoid Doeblin condition
+        else:
+            l, msg_ = matchLength(msg, i, window)
+            out["sum"] += np.log2(window + 1) / l  # to avoid Doeblin condition
+        out["subS"].append(msg_)
+        out["num"] += 1
+    out["h"] = out["sum"] / out["num"]
+    out["r"] = 1 - out["h"] / np.log2(len(msg))  # redundancy, 0<=r<=1
+    return out
+
+
+msg = "101010"
+print(konto(msg * 2))
+print(konto(msg + msg[::-1]))
+
+# -----------------------------------------------------------------------------
+# 19.1 implementation of the Corwin-Schultz algorithm
+def getBeta(series, sl):
+    hl = series[["High", "Low"]].values
+    hl = np.log(hl[:, 0] / hl[:, 1]) ** 2
+    hl = pd.Series(hl, index=series.index)
+    beta = pd.stats.moments.rolling_sum(hl, window=2)
+    beta = pd.stats.moments.rolling_mean(beta, window=sl)
+    return beta.dropna()
+
+
+def getGamma(series):
+    h2 = pd.stats.moments.rolling_max(series["High"], window=2)
+    l2 = pd.stats.moments.rolling_min(series["Low"], window=2)
+    gamma = np.log(h2.values / l2.values) ** 2
+    gamma = pd.Series(gamma, index=h2.index)
+    return gamma.dropna()
+
+
+def getAlpha(beta, gamma):
+    den = 3 - 2 * 2 ** 0.5
+    alpha = (2 ** 0.5 - 1) * (beta ** 0.5) / den
+    alpha -= (gamma / den) ** 0.5
+    alpha[alpha < 0] = 0  # set negative alphas to 0 (see p.727 of paper)
+    return alpha.dropna()
+
+
+def corwinSchultz(series, sl=1):
+    # Note: S<0 iif alpha<0
+    beta = getBeta(series, sl)
+    gamma = getGamma(series)
+    alpha = getAlpha(beta, gamma)
+    spread = 2 * (np.exp(alpha) - 1) / (1 + np.exp(alpha))
+    startTime = pd.Series(series.index[0 : spread.shape[0]], index=spread.index)
+    spread = pd.concat([spread, startTime], axis=1)
+    spread.columns = ["Spread", "Start_Time"]  # 1st loc used to compute beta
+    return spread
+
+
+# -----------------------------------------------------------------------------
+# 19.2 estimating volatility for high-low prices
+def getSigma(beta, gamma):
+    k2 = (8 / np.pi) ** 0.5
+    den = 3 - 2 * 2 ** 0.5
+    sigma = (2 ** -0.5 - 1) * beta ** 0.5 / (k2 * den)
+    sigma += (gamma / (k2 ** 2 * den)) ** 0.5
+    sigma[sigma < 0] = 0
+    return sigma
+
+
+# -----------------------------------------------------------------------------
+# 20.1 Un-vectorized cartesian product
+# Cartesian product of dictionary of lists
+dict0 = {"a": ["1", "2"], "b": ["+", "*"], "c": ["!", "@"]}
+for a in dict0["a"]:
+    for b in dict0["b"]:
+        for c in dict0["c"]:
+            print({"a": a, "b": b, "c": c})
+
+# -----------------------------------------------------------------------------
+# 20.2 vectorized cartesian product
+# Cartesian product of dictionary of lists
+from itertools import product
+
+dict0 = {"a": ["1", "2"], "b": ["+", "*"], "c": ["!", "@"]}
+jobs = (dict(zip(dict0, i)) for i in product(*dict0.values()))
+for i in jobs:
+    print(i)
+
+# -----------------------------------------------------------------------------
+# 20.3 single-thread implementation of a one-touch double barrier
+def main0():
+    # Path dependency: Sequential implementation
+    r = np.random.normal(0, 0.01, size=(1000, 10000))
+    t = barrierTouch(r)
+
+
+def barrierTouch(r, width=0.5):
+    # find the index of the earliest barrier touch
+    t, p = {}, np.log((1 + r).cumprod(axis=0))
+    for j in range(r.shape[1]):  # go through columns
+        for i in range(r.shape[0]):  # go through rows
+            if p[i, j] >= width or p[i, j] <= -width:
+                t[j] = i
+                continue
+    return t
+
+
+# -----------------------------------------------------------------------------
+# 20.4 multiprocessing implementation of a one-touch double barrier
+import multiprocessing as mp
+
+
+def main1():
+    # Path dependency: Multi-threaded implementation
+    r, numThreads = np.random.normal(0, 0.01, size=(1000, 10000)), 24
+    parts = np.linspace(0, r.shape[0], min(numThreads, r.shape[0]) + 1)
+    parts, jobs = np.ceil(parts).astype(int), []
+    for i in range(1, len(parts)):
+        jobs.append(r[:, parts[i - 1] : parts[i]])  # parallel jobs
+    pool, out = mp.Pool(processes=numThreads), []
+    outputs = pool.imap_unordered(barrierTouch, jobs)
+    for out_ in outputs:
+        out.append(out_)  # asynchronous response
+    pool.close()
+    pool.join()
+
+
+# -----------------------------------------------------------------------------
+# 20.5 the linParts function
+def linParts(numAtoms, numThreads):
+    # partition of atoms with a single loop
+    parts = np.linspace(0, numAtoms, min(numThreads, numAtoms) + 1)
+    parts = np.ceil(parts).astype(int)
+    return parts
+
+
+# -----------------------------------------------------------------------------
+# 20.6 the nestedParts function
+def nestedParts(numAtoms, numThreads, upperTriang=False):
+    # partition of atoms with an inner loop
+    parts, numThreads_ = [0], min(numThreads, numAtoms)
+    for num in range(numThreads_):
+        part = 1 + 4 * (
+            parts[-1] ** 2 + parts[-1] + numAtoms * (numAtoms + 1.0) / numThreads_
+        )
+        part = (-1 + part ** 0.5) / 2.0
+        parts.append(part)
+    parts = np.round(parts).astype(int)
+    if upperTriang:  # the first rows are the heaviest
+        parts = np.cumsum(np.diff(parts)[::-1])
+        parts = np.append(np.array([0]), parts)
+    return parts
+
+
+# -----------------------------------------------------------------------------
+# 20.7 the myPandasObj
+def mpPandasObj(func, pdObj, numThreads=24, mpBatches=1, linMols=True, **kargs):
+    """
+    Parallelize jobs, return a DataFrame or Series
+    + func: function to be parallelized. Returns a DataFrame
+    + pdObj[0]: Name of argument used to pass the molecule
+    + pdObj[1]: List of atoms that will be grouped into molecules
+    + kargs: any other argument needed by func
+    Example: df1=mpPandasObj(func,(’molecule’,df0.index),24,**kargs)
+    """
+    if linMols:
+        parts = linParts(len(argList[1]), numThreads * mpBatches)
+    else:
+        parts = nestedParts(len(argList[1]), numThreads * mpBatches)
+    jobs = []
+    for i in range(1, len(parts)):
+        job = {pdObj[0]: pdObj[1][parts[i - 1] : parts[i]], "func": func}
+    job.update(kargs)
+    jobs.append(job)
+    if numThreads == 1:
+        out = processJobs_(jobs)
+    else:
+        out = processJobs(jobs, numThreads=numThreads)
+    if isinstance(out[0], pd.DataFrame):
+        df0 = pd.DataFrame()
+    elif isinstance(out[0], pd.Series):
+        df0 = pd.Series()
+    else:
+        return out
+    for i in out:
+        df0 = df0.append(i)
+    df0 = df0.sort_index()
+    return df0
+
+
+# -----------------------------------------------------------------------------
+# 20.8 single-thread execution, for debugging
+def processJobs_(jobs):
+    # Run jobs sequentially, for debugging
+    out = []
+    for job in jobs:
+        out_ = expandCall(job)
+        out.append(out_)
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 20.9 example of asynchronous call to python's multiprocessing library
+import sys
+import datetime as dt
+import time
+
+
+def reportProgress(jobNum, numJobs, time0, task):
+    # Report progress as asynch jobs are completed
+    msg = [float(jobNum) / numJobs, (time.time() - time0) / 60.0]
+    msg.append(msg[1] * (1 / msg[0] - 1))
+    timeStamp = str(dt.datetime.fromtimestamp(time.time()))
+    msg = (
+        timeStamp
+        + " "
+        + str(round(msg[0] * 100, 2))
+        + "% "
+        + task
+        + " done after "
+        + str(round(msg[1], 2))
+        + " minutes. Remaining "
+        + str(round(msg[2], 2))
+        + " minutes."
+    )
+    if jobNum < numJobs:
+        sys.stderr.write(msg + "\r")
+    else:
+        sys.stderr.write(msg + "\n")
+    return
+
+
+def processJobs(jobs, task=None, numThreads=24):
+    # Run in parallel.
+    # jobs must contain a ’func’ callback, for expandCall
+    if task is None:
+        task = jobs[0]["func"].__name__
+    pool = mp.Pool(processes=numThreads)
+    outputs, out, time0 = pool.imap_unordered(expandCall, jobs), [], time.time()
+    # Process asynchronous output, report progress
+    for i, out_ in enumerate(outputs, 1):
+        out.append(out_)
+        reportProgress(i, len(jobs), time0, task)
+    pool.close()
+    pool.join()  # this is needed to prevent memory leaks
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 20.10 passing the job (molecule) to the callback function
+def expandCall(kargs):
+    # Expand the arguments of a callback function, kargs[’func’]
+    func = kargs["func"]
+    del kargs["func"]
+    out = func(**kargs)
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 20.11 place this code at the beginning of your engine
+def _pickle_method(method):
+    func_name = method.im_func.__name__
+    obj = method.im_self
+    cls = method.im_class
+    return _unpickle_method, (func_name, obj, cls)
+
+
+def _unpickle_method(func_name, obj, cls):
+    for cls in cls.mro():
+        try:
+            func = cls.__dict__[func_name]
+        except KeyError:
+            pass
+        else:
+            break
+    return func.__get__(obj, cls)
+
+
+import copyreg, types, multiprocessing as mp
+
+copyreg.pickle(types.MethodType, _pickle_method, _unpickle_method)
+
+# -----------------------------------------------------------------------------
+# 20.12 enhancing processJobs to perform on-the-fly output reduction
+import copy
+
+
+def processJobsRedux(
+    jobs, task=None, numThreads=24, redux=None, reduxArgs={}, reduxInPlace=False
+):
+    """
+    Run in parallel
+    jobs must contain a ’func’ callback, for expandCall
+    redux prevents wasting memory by reducing output on the fly
+    """
+    if task is None:
+        task = jobs[0]["func"].__name__
+    pool = mp.Pool(processes=numThreads)
+    imap, out, time0 = pool.imap_unordered(expandCall, jobs), None, time.time()
+    # Process asynchronous output, report progress
+    for i, out_ in enumerate(imap, 1):
+        if out is None:
+            if redux is None:
+                out, redux, reduxInPlace = [out_], list.append, True
+            else:
+                out = copy.deepcopy(out_)
+        else:
+            if reduxInPlace:
+                redux(out, out_, **reduxArgs)
+            else:
+                out = redux(out, out_, **reduxArgs)
+        reportProgress(i, len(jobs), time0, task)
+    pool.close()
+    pool.join()  # this is needed to prevent memory leaks
+    if isinstance(out, (pd.Series, pd.DataFrame)):
+        out = out.sort_index()
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 20.13 enhancing mpPandasObj to perform on-the-fly output reduction
+def mpJobList(
+    func,
+    argList,
+    numThreads=24,
+    mpBatches=1,
+    linMols=True,
+    redux=None,
+    reduxArgs={},
+    reduxInPlace=False,
+    **kargs,
+):
+    if linMols:
+        parts = linParts(len(argList[1]), numThreads * mpBatches)
+    else:
+        parts = nestedParts(len(argList[1]), numThreads * mpBatches)
+    jobs = []
+    for i in range(1, len(parts)):
+        job = {argList[0]: argList[1][parts[i - 1] : parts[i]], "func": func}
+        job.update(kargs)
+        jobs.append(job)
+    out = processJobsRedux(
+        jobs,
+        redux=redux,
+        reduxArgs=reduxArgs,
+        reduxInPlace=reduxInPlace,
+        numThreads=numThreads,
+    )
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 20.14 principal components for a subset of the columns
+pcs = mpJobList(
+    getPCs,
+    ("molecules", fileNames),
+    numThreads=24,
+    mpBatches=1,
+    path=path,
+    eVec=eVec,
+    redux=pd.DataFrame.add,
+)
+
+
+def getPCs(path, molecules, eVec):
+    # get principal components by loading one file at a time
+    pcs = None
+    for i in molecules:
+        df0 = pd.read_csv(path + i, index_col=0, parse_dates=True)
+        if pcs is None:
+            pcs = np.dot(df0.values, eVec.loc[df0.columns].values)
+        else:
+            pcs += np.dot(df0.values, eVec.loc[df0.columns].values)
+    pcs = pd.DataFrame(pcs, index=df0.index, columns=eVec.columns)
+    return pcs
