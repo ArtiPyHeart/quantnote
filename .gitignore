@@ -16,3 +16,12 @@ gen
 000985中证全指.xlsx
 default.profraw
 tushare_temp.ipynb
+!/default.profraw
+notebooks/uda_notebooks/project 7 combine signals for enhanced alpha/.ipynb_checkpoints/
+!/tushare_temp.ipynb
+!/.ipynb_checkpoints/
+!/.ipynb_checkpoints/tushare_temp-checkpoint.ipynb
+!/notebooks/.ipynb_checkpoints/
+/.ipynb_checkpoints/
+/notebooks/.ipynb_checkpoints/
+/.ipynb_checkpoints/
